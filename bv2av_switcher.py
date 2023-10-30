@@ -12,7 +12,7 @@ class Video:
     add = 8728348608
 
     def __init__(self, av: Optional[int] = None, bv: Optional[str] = None, *args):
-        self.av = int(av)
+        self.av = av
         self.bv = bv
         if av is None and bv is None:
             raise ValueError("请提供av号或bv号其中的一个！")

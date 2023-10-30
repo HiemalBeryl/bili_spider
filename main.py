@@ -1,11 +1,14 @@
+import asyncio
 import math
+import re
+import httpx
+import pymysql
 from json import JSONDecodeError
 from typing import Optional
 from datetime import datetime
 from httpx import Cookies
-from pymysql import err
-import httpx
-import pymysql
+from pymysql import err, OperationalError
+
 
 from bv2av_switcher import Video
 
@@ -60,37 +63,24 @@ async def fetch_data(url, method='GET', params=None, cookies=None):
             print(f"JSON decode error: {e}")
 
 
-# 获取指定网页并返回json
-def get_video_page(av: Optional[str | int] = None, bv: Optional[str] = None, url: str = None, use_cookies=False):
-    # 输入值校验
-    if url is None:
-        raise ValueError("请输入正确的网址")
-    if av is None and bv is None:
-        raise ValueError("请提供av号或bv号其中的一个！")
-    elif bv is None:
-        video = Video(av)
-        bv = video.av2bv()
-
-    # 访问地址
-    if use_cookies:
-        cookies = init_cookies()
-    else:
-        cookies = Cookies()
-    res = httpx.get(f"{url}?bvid={bv}", headers=headers, cookies=cookies)
-    return res.json()
-
-
 # 获取视频播放量等基础信息
 def get_video_info(av: Optional[str | int] = None, bv: Optional[str] = None):
-    # 构造参数
+    # 构造请求参数
     video = Video(av, bv)
     cookies = init_cookies()
     params = {
         'bvid': video.bv
     }
-    j = await fetch_data(basic_info, 'GET', params, cookies)
-    # j = get_video_page(av, bv, basic_info, True)
-    j = j['data']
+
+    # TODO:研究这里应该如何处理最优雅，异步请求如果出现异常返回空值，外部是接着抛异常还是用if判断！
+    # 开始异步请求
+    j = asyncio.run(fetch_data(basic_info, 'GET', params, cookies))
+    if j is not None:
+        j = j['data']
+    else:
+        return None
+
+    # 构造返回结果
     video_data = {
         'bv': j['bvid'],
         'av': j['aid'],
@@ -112,38 +102,29 @@ def get_video_info(av: Optional[str | int] = None, bv: Optional[str] = None):
     return video_data
 
 
-# 获取指定网页并返回json
-def get_reply_page(av: Optional[str | int] = None, bv: Optional[str] = None, page: int = 1, type: int = 1,
-                   sort: int = 0, url: str = None, ):
-    # 输入值校验
-    if url is None:
-        raise ValueError("请输入正确的网址")
-    if av is None and bv is None:
-        raise ValueError("请提供av号或bv号其中的一个！")
-    elif bv is None:
-        video = Video(av)
-        bv = video.av2bv()
-    elif av is None:
-        video = Video(av)
-        bv = video.av2bv()
-
-    # 访问地址
-    res = httpx.get(f"{url}?pn={page}&type={type}&oid={av}&sort={sort}", headers=headers)
-    print(res.text)
-    try:
-        return res.json()
-    except JSONDecodeError:
-        return None
-    return None
-
-
 # 获取评论
 def get_video_reply(av: Optional[str | int] = None, bv: Optional[str] = None):
-    j = get_reply_page(av, bv, page=1, type=1, sort=0, url=reply_by_page)
-    j = j['data']
-    count = j['page']['count']
-    acount = j['page']['acount']
-    for page in range(1, math.ceil(count / 20) + 100):
+    # 构造请求参数
+    video = Video(av, bv)
+    # pn页码，type资源类型（视频、动态），oid资源id（视频为av号），sort排序方式（0按时间2按热度）
+    params = {
+        'pn': 1,
+        'type': 1,
+        'oid': video.av,
+        'sort': 0
+    }
+
+    # TODO:研究这里应该如何处理最优雅，异步请求如果出现异常返回空值，外部是接着抛异常还是用if判断！
+    # 开始异步请求
+    j = asyncio.run(fetch_data(reply_by_page, 'GET', params))
+    if j is not None:
+        j = j['data']
+        count = j['page']['count']
+        acount = j['page']['acount']
+    else:
+        return None
+    # TODO:这里计算评论总页数可能有bug，反正是目前获取不到所有评论
+    for page in range(1, math.ceil(count / 20) + 50):
         # 先处理上次请求获取的replies列表
         if isinstance(j['replies'], list):
             for item in j['replies']:
@@ -178,13 +159,117 @@ def get_video_reply(av: Optional[str | int] = None, bv: Optional[str] = None):
                         'content') else ' ',
                     'jump_url': str(item.get('content')['jump_url']) if item.get('content') and 'jump_url' in item.get(
                         'content') else ' ',
-                    'have_sub_replies': item.get('replies') is not None
+                    'have_sub_replies': 0,
+                    'location': None
                 }
+                if 'sub_reply_title_text' in item.get('reply_control'):
+                    pattern = r'\d+'  # 匹配一个或多个数字
+                    reply_data['have_sub_replies'] = re.findall(pattern,
+                                                                item.get('reply_control')['sub_reply_title_text'])
+                if 'location' in item.get('reply_control'):
+                    reply_data['location'] = item.get('reply_control')['location']
                 print(reply_data)
                 save_into_db(reply_data, 'reply_info')
         # 再发送一次请求
-        j = get_reply_page(av, bv, page=page + 1, type=1, sort=0, url=reply_by_page)
-        j = j['data']
+        params['pn'] = page
+        j = asyncio.run(fetch_data(reply_by_page, 'GET', params))
+        if j is not None and 'data' in j:
+            j = j['data']
+        else:
+            break
+
+
+# 获取子评论
+def get_sub_reply(start: Optional[int] = 1):
+    # 获取任务列表
+    task_page = start
+    tasks = get_sub_reply_task_from_db(task_page)
+    print(f"开始执行第{task_page}页任务，任务元组：{tasks}")
+    while len(tasks) != 0:
+        # 查询评论并格式化数据
+
+        for task in tasks:
+            # 构造请求参数
+            cookies = init_cookies()
+            params = {
+                'oid': task[0],
+                'type': task[1],
+                'root': task[2],
+                'ps': 20,
+                'pn': 1
+            }
+
+            # 开始异步请求
+            j = asyncio.run(fetch_data(sub_reply, 'GET', params, cookies))
+            if j is not None:
+                j = j['data']
+                size = j['page']['size']
+                count = j['page']['count']
+            else:
+                continue
+            for page in range(1, math.ceil(count / size) + 5):
+                # 先处理上次请求获取的replies列表
+                if isinstance(j['replies'], list):
+                    for item in j['replies']:
+                        reply_data = {
+                            'rpid': item.get('rpid'),
+                            'oid': item.get('oid'),
+                            'mid': item.get('mid'),
+                            'type': item.get('type'),
+                            'root': item.get('root'),
+                            'parent': item.get('parent'),
+                            'dialog': item.get('dialog'),
+                            'count': item.get('count'),
+                            'rcount': item.get('rcount'),
+                            'state': item.get('state'),
+                            'fansgrade': item.get('fansgrade'),
+                            'attr': item.get('attr'),
+                            'upload_time': datetime.fromtimestamp(item.get('ctime')),
+                            'like_times': item.get('like'),
+                            'username': item.get('member')['uname'],
+                            'sex': item.get('member')['sex'],
+                            'sign': item.get('member')['sign'],
+                            'avatar': item.get('member')['avatar'],
+                            'user_level': item.get('member')['level_info']['current_level'],
+                            'is_official': item.get('member')['official_verify']['type'],
+                            'official_desc': item.get('member')['official_verify']['desc'],
+                            'is_big_vip': item.get('member')['vip']['vipStatus'],
+                            'big_vip_endtime': datetime.fromtimestamp(
+                                int(item.get('member')['vip']['vipDueDate']) / 1000),
+                            'message': item.get('content')['message'],
+                            'members': str(item.get('content')['members']) if item.get(
+                                'content') and 'members' in item.get(
+                                'content') else ' ',
+                            'emote': str(item.get('content')['emote']) if item.get('content') and 'emote' in item.get(
+                                'content') else ' ',
+                            'jump_url': str(item.get('content')['jump_url']) if item.get(
+                                'content') and 'jump_url' in item.get(
+                                'content') else ' ',
+                            'have_sub_replies': 0,
+                            'location': None
+                        }
+                        if 'sub_reply_title_text' in item.get('reply_control'):
+                            pattern = r'\d+'  # 匹配一个或多个数字
+                            reply_data['have_sub_replies'] = re.findall(pattern,
+                                                                        item.get('reply_control')[
+                                                                            'sub_reply_title_text'])
+                        if 'location' in item.get('reply_control'):
+                            reply_data['location'] = item.get('reply_control')['location']
+                        print(reply_data)
+                        save_into_db(reply_data, 'reply_info')
+                # 再发送一次请求
+                params['pn'] = page
+                j = asyncio.run(fetch_data(sub_reply, 'GET', params))
+                if j is not None and 'data' in j:
+                    j = j['data']
+                else:
+                    break
+        task_page += 1
+        tasks = get_sub_reply_task_from_db(task_page)
+        print(f"开始执行第{task_page}页任务，任务元组：{tasks}")
+
+
+        # 保存到数据库
 
 
 # TODO:保存到数据库，目前是串行不支持并发，一定要改！！！
@@ -219,28 +304,71 @@ def save_into_db(data: dict = None, table_name: str = None):
     connect.close()
 
 
+def get_sub_reply_task_from_db(page: int = 1, size: Optional[int] = 1000) -> tuple:
+    try:
+        connect = pymysql.connect(host=db_host, user=db_user, passwd=db_password, port=db_port, db=db_db)
+        print("连接数据库成功！")
+    except:
+        print("连接数据库失败！")
+        return 1
+
+    try:
+        cursor = connect.cursor()
+        sql = f"SELECT oid, type, rpid FROM reply_info WHERE have_sub_replies != 0 LIMIT {size * (page - 1)},{size}"
+        print(sql)
+        cursor.execute(sql)
+        response = cursor.fetchall()
+        connect.close()
+        return response
+    except OperationalError:
+        print("查询失败，可能是sql语法有误！")
+        connect.close()
+        return ()
+
+
 # info = get_video_info(bv="BV1zv4y117zo")
 # info2 = get_video_info(bv="BV1g84y1R7YH")
 # info3 = get_video_info(bv="BV1Lw411w7Hc")
 # info4 = get_video_info(bv="BV1x34y1M7LU")
 # info5 = get_video_info(av=863041388)
 # info6 = get_video_info(av=308030996)
-info7 = get_video_info(av=990547962)
+# info7 = get_video_info(av=990547962)
 # info8 = get_video_info(av=223004948)
 # info9 = get_video_info(av=223004948)
 # info10 = get_video_info(av=543790482)
+# info11 = get_video_info(bv='BV1zv4y117zo')
+info12 = get_video_info(bv='BV16s41167m3')
+info13 = get_video_info(bv='BV1n54y1S79k')
+info14 = get_video_info(bv='BV1At4y1q7UQ')
+info15 = get_video_info(bv='BV1kJ411Q7rY')
+info16 = get_video_info(bv='BV1MN4y177PB')
 # save_into_db(info, 'video_info')
 # save_into_db(info2, 'video_info')
 # save_into_db(info3, 'video_info')
 # save_into_db(info4, 'video_info')
 # save_into_db(info5, 'video_info')
 # save_into_db(info6, 'video_info')
-save_into_db(info7, 'video_info')
+# save_into_db(info7, 'video_info')
 # save_into_db(info8, 'video_info')
 # save_into_db(info9, 'video_info')
 # save_into_db(info10, 'video_info')
+# save_into_db(info11, 'video_info')
+save_into_db(info12, 'video_info')
+save_into_db(info13, 'video_info')
+save_into_db(info14, 'video_info')
+save_into_db(info15, 'video_info')
+save_into_db(info16, 'video_info')
 # get_video_reply(av=863041388)
 # get_video_reply(av=308030996)
-get_video_reply(av=990547962)
+# get_video_reply(av=990547962)
 # get_video_reply(av=223004948)
 # get_video_reply(av=543790482)
+# get_video_reply(av=565417552)
+
+# get_video_reply(av=6108496)
+# get_video_reply(av=838932570)
+get_video_reply(av=627167023)
+get_video_reply(av=77511727)
+get_video_reply(av=898762590)
+get_sub_reply()
+# get_sub_reply(3)
