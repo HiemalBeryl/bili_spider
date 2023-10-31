@@ -1,6 +1,8 @@
 import asyncio
 import math
 import re
+import time
+
 import httpx
 import pymysql
 from json import JSONDecodeError
@@ -8,7 +10,6 @@ from typing import Optional
 from datetime import datetime
 from httpx import Cookies
 from pymysql import err, OperationalError
-
 
 from bv2av_switcher import Video
 
@@ -24,6 +25,28 @@ basic_info = "https://api.bilibili.com/x/web-interface/view"
 reply_by_page = "https://api.bilibili.com/x/v2/reply"
 sub_reply = "https://api.bilibili.com/x/v2/reply/reply"
 reply_lazy_loading = "https://api.bilibili.com/x/v2/reply/main"
+ranking = "https://api.bilibili.com/x/web-interface/ranking/v2"
+ranking_params = {
+    '全站': {'rid': 0, 'type': 'all'},
+    '国创相关': {'rid': 168, 'type': 'all'},
+    '动画': {'rid': 1, 'type': 'all'},
+    '音乐': {'rid': 3, 'type': 'all'},
+    '舞蹈': {'rid': 129, 'type': 'all'},
+    '游戏': {'rid': 4, 'type': 'all'},
+    '知识': {'rid': 36, 'type': 'all'},
+    '科技': {'rid': 188, 'type': 'all'},
+    '运动': {'rid': 234, 'type': 'all'},
+    '汽车': {'rid': 223, 'type': 'all'},
+    '生活': {'rid': 160, 'type': 'all'},
+    '美食': {'rid': 211, 'type': 'all'},
+    '动物圈': {'rid': 217, 'type': 'all'},
+    '鬼畜': {'rid': 119, 'type': 'all'},
+    '时尚': {'rid': 155, 'type': 'all'},
+    '娱乐': {'rid': 5, 'type': 'all'},
+    '影视': {'rid': 181, 'type': 'all'},
+    '原创': {'rid': 0, 'type': 'origin'},
+    '新人': {'rid': 0, 'type': 'rookie'}
+}
 db_host = 'nas.hiemalberyl.cn'
 db_user = 'xtjcyyh'
 db_password = 'xtjcyyh2023'
@@ -75,7 +98,7 @@ def get_video_info(av: Optional[str | int] = None, bv: Optional[str] = None):
     # TODO:研究这里应该如何处理最优雅，异步请求如果出现异常返回空值，外部是接着抛异常还是用if判断！
     # 开始异步请求
     j = asyncio.run(fetch_data(basic_info, 'GET', params, cookies))
-    if j is not None:
+    if j is not None and 'data' in j:
         j = j['data']
     else:
         return None
@@ -127,6 +150,7 @@ def get_video_reply(av: Optional[str | int] = None, bv: Optional[str] = None):
     for page in range(1, math.ceil(count / 20) + 50):
         # 先处理上次请求获取的replies列表
         if isinstance(j['replies'], list):
+            insert_data = []
             for item in j['replies']:
                 reply_data = {
                     'rpid': item.get('rpid'),
@@ -168,9 +192,11 @@ def get_video_reply(av: Optional[str | int] = None, bv: Optional[str] = None):
                                                                 item.get('reply_control')['sub_reply_title_text'])
                 if 'location' in item.get('reply_control'):
                     reply_data['location'] = item.get('reply_control')['location']
-                print(reply_data)
-                save_into_db(reply_data, 'reply_info')
+                insert_data.append(reply_data)
+            print(insert_data)
+            save_batch_into_db(insert_data, 'reply_info')
         # 再发送一次请求
+        time.sleep(5)
         params['pn'] = page
         j = asyncio.run(fetch_data(reply_by_page, 'GET', params))
         if j is not None and 'data' in j:
@@ -210,6 +236,7 @@ def get_sub_reply(start: Optional[int] = 1):
             for page in range(1, math.ceil(count / size) + 5):
                 # 先处理上次请求获取的replies列表
                 if isinstance(j['replies'], list):
+                    insert_data = []
                     for item in j['replies']:
                         reply_data = {
                             'rpid': item.get('rpid'),
@@ -255,9 +282,11 @@ def get_sub_reply(start: Optional[int] = 1):
                                                                             'sub_reply_title_text'])
                         if 'location' in item.get('reply_control'):
                             reply_data['location'] = item.get('reply_control')['location']
-                        print(reply_data)
-                        save_into_db(reply_data, 'reply_info')
+                        insert_data.append(reply_data)
+                    print(insert_data)
+                    save_batch_into_db(insert_data, 'reply_info')
                 # 再发送一次请求
+                time.sleep(3)
                 params['pn'] = page
                 j = asyncio.run(fetch_data(sub_reply, 'GET', params))
                 if j is not None and 'data' in j:
@@ -269,14 +298,51 @@ def get_sub_reply(start: Optional[int] = 1):
         print(f"开始执行第{task_page}页任务，任务元组：{tasks}")
 
 
-        # 保存到数据库
+# 从排行榜获取当前热门视频
+def get_ranking():
+    for v in ranking_params.values():
+        j = asyncio.run(fetch_data(ranking, 'GET', v, init_cookies()))
+        if j is not None and 'data' in j:
+            j = j['data']['list']
+        insert_data = []
+        for item in j:
+            task_data0 = {
+                'bv': item['bvid'],
+                'av': item['aid'],
+                'mid': item['owner']['mid'],
+                'up_name': item['owner']['name'],
+                'reply_next_page': 0,
+                'owner': 0,
+                'type': 0
+            }
+            task_data1 = {
+                'bv': item['bvid'],
+                'av': item['aid'],
+                'mid': item['owner']['mid'],
+                'up_name': item['owner']['name'],
+                'reply_next_page': 0,
+                'owner': 0,
+                'type': 1
+            }
+            task_data2 = {
+                'bv': item['bvid'],
+                'av': item['aid'],
+                'mid': item['owner']['mid'],
+                'up_name': item['owner']['name'],
+                'reply_next_page': 0,
+                'owner': 0,
+                'type': 2
+            }
+            insert_data.append(task_data0)
+            insert_data.append(task_data1)
+            insert_data.append(task_data2)
+        print(insert_data)
+        save_batch_into_db(insert_data, 'task_list')
 
 
-# TODO:保存到数据库，目前是串行不支持并发，一定要改！！！
 def save_into_db(data: dict = None, table_name: str = None):
     try:
         connect = pymysql.connect(host=db_host, user=db_user, passwd=db_password, port=db_port, db=db_db)
-        print("连接数据库成功！")
     except:
         print("连接数据库失败！")
         return 1
@@ -295,13 +361,46 @@ def save_into_db(data: dict = None, table_name: str = None):
     try:
         cursor.execute(res_sql, data)
         connect.commit()
-        print('数据插入成功！')
     except err.IntegrityError:
         print('数据已存在，保存失败')
-    except:
+    except Exception as e:
         connect.rollback()
-        print('发生未知错误！')
+        print(f'发生未知错误！{e}')
     connect.close()
+
+
+def save_batch_into_db(data_list: list = None, table_name: str = None):
+    if not data_list:
+        print("数据为空，无需插入。")
+        return
+
+    try:
+        connection = pymysql.connect(host=db_host, user=db_user, passwd=db_password, port=db_port, db=db_db)
+    except Exception as e:
+        print(f"连接数据库失败: {e}")
+        return 1
+
+    cursor = connection.cursor()
+    cols = ", ".join('`{}`'.format(k) for k in data_list[0].keys())
+
+    val_cols = ', '.join('%s' for _ in data_list[0].keys())
+
+    sql = f"INSERT INTO {table_name} ({cols}) VALUES ({val_cols}) ON DUPLICATE KEY UPDATE "
+    update_cols = ', '.join([f"{col}=VALUES({col})" for col in data_list[0].keys()])
+    sql += update_cols
+
+    try:
+        # Prepare a list of tuples for executemany
+        data = [tuple(item.values()) for item in data_list]
+
+        cursor.executemany(sql, data)
+        print(f"执行成功，即将提交事务，影响行数：{cursor.rowcount}")
+        connection.commit()
+    except Exception as e:
+        connection.rollback()
+        print(f'发生未知错误！{e}')
+    finally:
+        connection.close()
 
 
 def get_sub_reply_task_from_db(page: int = 1, size: Optional[int] = 1000) -> tuple:
@@ -326,6 +425,65 @@ def get_sub_reply_task_from_db(page: int = 1, size: Optional[int] = 1000) -> tup
         return ()
 
 
+# 从数据库中获取即将执行的任务
+def get_task_from_db(page: int = 1, size: Optional[int] = 1000, task_type: int = 0):
+    try:
+        connect = pymysql.connect(host=db_host, user=db_user, passwd=db_password, port=db_port, db=db_db)
+        print("连接数据库成功！")
+    except:
+        print("连接数据库失败！")
+        return 1
+
+    try:
+        cursor = connect.cursor()
+        sql = f"SELECT bv, av FROM task_list WHERE type = {task_type} AND is_working = 1 AND TIMESTAMPDIFF(MINUTE, last_execute_time, CURTIME()) LIMIT {size * (page - 1)},{size}"
+        print(sql)
+        cursor.execute(sql)
+        response = cursor.fetchall()
+        connect.close()
+        return response
+    except OperationalError:
+        print("查询失败，可能是sql语法有误！")
+        connect.close()
+        return ()
+
+
+# 任务1，爬取其播放量信息
+def main1():
+    page = 1
+    size = 500
+    results = get_task_from_db(page, size, 0)
+    while len(results) != 0:
+        videos = []
+        for r in results:
+            videos.append(Video(r[1], r[0]))
+        page += 1
+        print(page)
+        for v in videos:
+            info = get_video_info(v.av)
+            if info is not None:
+                save_into_db(info, 'video_info')
+        results = get_task_from_db(page, size, 0)
+
+
+# 任务2 爬取二舅视频评论
+def main2():
+    pass
+
+
+# 任务3 爬取热门视频
+def main3():
+    get_ranking()
+
+
+if __name__ == "__main__":
+    # main1()
+    # get_ranking()
+    info16 = get_video_info(bv='BV1MN4y177PB')
+    save_into_db(info16, 'video_info')
+    get_video_reply(av=898762590)
+    get_sub_reply(3)
+
 # info = get_video_info(bv="BV1zv4y117zo")
 # info2 = get_video_info(bv="BV1g84y1R7YH")
 # info3 = get_video_info(bv="BV1Lw411w7Hc")
@@ -337,10 +495,10 @@ def get_sub_reply_task_from_db(page: int = 1, size: Optional[int] = 1000) -> tup
 # info9 = get_video_info(av=223004948)
 # info10 = get_video_info(av=543790482)
 # info11 = get_video_info(bv='BV1zv4y117zo')
-info12 = get_video_info(bv='BV16s41167m3')
-info13 = get_video_info(bv='BV1n54y1S79k')
-info14 = get_video_info(bv='BV1At4y1q7UQ')
-info15 = get_video_info(bv='BV1kJ411Q7rY')
+# info12 = get_video_info(bv='BV16s41167m3')
+# info13 = get_video_info(bv='BV1n54y1S79k')
+# info14 = get_video_info(bv='BV1At4y1q7UQ')
+# info15 = get_video_info(bv='BV1kJ411Q7rY')
 info16 = get_video_info(bv='BV1MN4y177PB')
 # save_into_db(info, 'video_info')
 # save_into_db(info2, 'video_info')
@@ -353,10 +511,10 @@ info16 = get_video_info(bv='BV1MN4y177PB')
 # save_into_db(info9, 'video_info')
 # save_into_db(info10, 'video_info')
 # save_into_db(info11, 'video_info')
-save_into_db(info12, 'video_info')
-save_into_db(info13, 'video_info')
-save_into_db(info14, 'video_info')
-save_into_db(info15, 'video_info')
+# save_into_db(info12, 'video_info')
+# save_into_db(info13, 'video_info')
+# save_into_db(info14, 'video_info')
+# save_into_db(info15, 'video_info')
 save_into_db(info16, 'video_info')
 # get_video_reply(av=863041388)
 # get_video_reply(av=308030996)
@@ -367,8 +525,11 @@ save_into_db(info16, 'video_info')
 
 # get_video_reply(av=6108496)
 # get_video_reply(av=838932570)
-get_video_reply(av=627167023)
-get_video_reply(av=77511727)
+# get_video_reply(av=627167023)
+# get_video_reply(av=77511727)
 get_video_reply(av=898762590)
-get_sub_reply()
-# get_sub_reply(3)
+# get_sub_reply()
+get_sub_reply(3)
+
+# get_ranking()
+# TODO:研究如何并发，以及批量插入指定查询和更新
