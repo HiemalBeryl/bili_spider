@@ -1,0 +1,76 @@
+### 查询爬虫列表
+GET http://127.0.0.1:8000/spider/list
+
+
+### 新增爬虫任务(0.视频基本信息爬虫)
+POST http://127.0.0.1:8000/spider/add
+Content-Type: application/json
+
+{
+  "name": "ViewSpider",
+  "type": 0,
+  "is_loop": 1,
+  "interval": 600
+}
+
+
+### 新增爬虫任务(1.评论爬虫)
+POST http://127.0.0.1:8000/spider/add
+Content-Type: application/json
+
+{
+  "name": "ReplySpider",
+  "type": 1,
+  "is_loop": 1,
+  "interval": 600
+}
+
+
+
+### 新增爬虫任务(2.子评论爬虫)
+POST http://127.0.0.1:8000/spider/add
+Content-Type: application/json
+
+{
+  "name": "SubReplySpider",
+  "type": 2,
+  "is_loop": 1,
+  "interval": 600
+}
+
+
+
+### 新增爬虫任务(3.排行榜爬虫)
+POST http://127.0.0.1:8000/spider/add
+Content-Type: application/json
+
+{
+  "name": "RankSpider",
+  "type": 3,
+  "is_loop": 1,
+  "interval": 5
+}
+
+### 修改爬虫
+PUT http://127.0.0.1:8000/spider/edit
+Content-Type: application/json
+
+{
+  "name": "RankSpider",
+  "type": 3,
+  "is_loop": 1,
+  "interval": 3
+}
+
+
+### 开启爬虫
+PUT http://127.0.0.1:8000/spider/alert?spider_name=RankSpider&option=1
+Content-Type: application/json
+
+### 关闭爬虫
+PUT http://127.0.0.1:8000/spider/alert?spider_name=RankSpider&option=0
+Content-Type: application/json
+
+### 删除爬虫
+DELETE http://127.0.0.1:8000/spider/delete?spider_name=RankSpider
+Content-Type: application/json

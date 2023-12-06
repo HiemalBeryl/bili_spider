@@ -10,8 +10,8 @@ from typing import Optional
 from datetime import datetime
 from httpx import Cookies
 from pymysql import err, OperationalError
-
-from bv2av_switcher import Video
+from .bv2avSwitcher import Video
+from entity.spiderEntity import SpiderParam
 
 headers = {
     'user-agent': 'Mozilla/5.0 (Windows NT 10.0; WOW64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/110.0.0.0 '
@@ -56,7 +56,7 @@ db_db = 'xtjcyyh'
 
 def init_cookies():
     c = Cookies()
-    with open("cookies.txt", "r", encoding="utf-8") as f:
+    with open("./spider/cookies.txt", "r", encoding="utf-8") as f:
         for line in f:
             cookie_split = line.split('=')
             c.set(name=cookie_split[0], value=cookie_split[1].strip(','), domain="https://www.bilibili.com")
@@ -68,9 +68,9 @@ async def fetch_data(url, method='GET', params=None, cookies=None):
     async with httpx.AsyncClient() as client:
         try:
             if method == 'GET':
-                response = await client.get(url, params=params, headers=headers, cookies=cookies)
+                response = await client.get(url, params=params, headers=headers, cookies=cookies, timeout=10)
             elif method == 'POST':
-                response = await client.post(url, data=params, headers=headers, cookies=cookies)
+                response = await client.post(url, data=params, headers=headers, cookies=cookies, timeout=10)
             else:
                 raise ValueError("Unsupported HTTP method")
 
@@ -87,7 +87,7 @@ async def fetch_data(url, method='GET', params=None, cookies=None):
 
 
 # 获取视频播放量等基础信息
-def get_video_info(av: Optional[str | int] = None, bv: Optional[str] = None):
+async def get_video_info(av: Optional[str | int] = None, bv: Optional[str] = None):
     # 构造请求参数
     video = Video(av, bv)
     cookies = init_cookies()
@@ -97,7 +97,7 @@ def get_video_info(av: Optional[str | int] = None, bv: Optional[str] = None):
 
     # TODO:研究这里应该如何处理最优雅，异步请求如果出现异常返回空值，外部是接着抛异常还是用if判断！
     # 开始异步请求
-    j = asyncio.run(fetch_data(basic_info, 'GET', params, cookies))
+    j = await fetch_data(basic_info, 'GET', params, cookies)
     if j is not None and 'data' in j:
         j = j['data']
     else:
@@ -126,7 +126,7 @@ def get_video_info(av: Optional[str | int] = None, bv: Optional[str] = None):
 
 
 # 获取评论
-def get_video_reply(av: Optional[str | int] = None, bv: Optional[str] = None):
+async def get_video_reply(av: Optional[str | int] = None, bv: Optional[str] = None):
     # 构造请求参数
     video = Video(av, bv)
     # pn页码，type资源类型（视频、动态），oid资源id（视频为av号），sort排序方式（0按时间2按热度）
@@ -139,7 +139,7 @@ def get_video_reply(av: Optional[str | int] = None, bv: Optional[str] = None):
 
     # TODO:研究这里应该如何处理最优雅，异步请求如果出现异常返回空值，外部是接着抛异常还是用if判断！
     # 开始异步请求
-    j = asyncio.run(fetch_data(reply_by_page, 'GET', params))
+    j = await fetch_data(reply_by_page, 'GET', params)
     if j is not None:
         j = j['data']
         count = j['page']['count']
@@ -193,12 +193,12 @@ def get_video_reply(av: Optional[str | int] = None, bv: Optional[str] = None):
                 if 'location' in item.get('reply_control'):
                     reply_data['location'] = item.get('reply_control')['location']
                 insert_data.append(reply_data)
-            print(insert_data)
+            # print(insert_data)
             save_batch_into_db(insert_data, 'reply_info')
         # 再发送一次请求
-        time.sleep(5)
+        await asyncio.sleep(5)
         params['pn'] = page
-        j = asyncio.run(fetch_data(reply_by_page, 'GET', params))
+        j = await fetch_data(reply_by_page, 'GET', params)
         if j is not None and 'data' in j:
             j = j['data']
         else:
@@ -206,7 +206,7 @@ def get_video_reply(av: Optional[str | int] = None, bv: Optional[str] = None):
 
 
 # 获取子评论
-def get_sub_reply(start: Optional[int] = 1):
+async def get_sub_reply(start: Optional[int] = 1):
     # 获取任务列表
     task_page = start
     tasks = get_sub_reply_task_from_db(task_page)
@@ -226,7 +226,7 @@ def get_sub_reply(start: Optional[int] = 1):
             }
 
             # 开始异步请求
-            j = asyncio.run(fetch_data(sub_reply, 'GET', params, cookies))
+            j = await fetch_data(sub_reply, 'GET', params, cookies)
             if j is not None:
                 j = j['data']
                 size = j['page']['size']
@@ -283,12 +283,12 @@ def get_sub_reply(start: Optional[int] = 1):
                         if 'location' in item.get('reply_control'):
                             reply_data['location'] = item.get('reply_control')['location']
                         insert_data.append(reply_data)
-                    print(insert_data)
+                    # print(insert_data)
                     save_batch_into_db(insert_data, 'reply_info')
                 # 再发送一次请求
-                time.sleep(3)
+                await asyncio.sleep(2)
                 params['pn'] = page
-                j = asyncio.run(fetch_data(sub_reply, 'GET', params))
+                j = await fetch_data(sub_reply, 'GET', params)
                 if j is not None and 'data' in j:
                     j = j['data']
                 else:
@@ -299,9 +299,9 @@ def get_sub_reply(start: Optional[int] = 1):
 
 
 # 从排行榜获取当前热门视频
-def get_ranking():
+async def get_ranking():
     for v in ranking_params.values():
-        j = asyncio.run(fetch_data(ranking, 'GET', v, init_cookies()))
+        j = await fetch_data(ranking, 'GET', v, init_cookies())
         if j is not None and 'data' in j:
             j = j['data']['list']
         insert_data = []
@@ -336,7 +336,7 @@ def get_ranking():
             insert_data.append(task_data0)
             insert_data.append(task_data1)
             insert_data.append(task_data2)
-        print(insert_data)
+        # print(insert_data)
         save_batch_into_db(insert_data, 'task_list')
 
 
@@ -449,7 +449,7 @@ def get_task_from_db(page: int = 1, size: Optional[int] = 1000, task_type: int =
 
 
 # 任务1，爬取其播放量信息
-def main1():
+async def main1():
     page = 1
     size = 500
     results = get_task_from_db(page, size, 0)
@@ -460,76 +460,48 @@ def main1():
         page += 1
         print(page)
         for v in videos:
-            info = get_video_info(v.av)
+            info = await get_video_info(v.av)
             if info is not None:
                 save_into_db(info, 'video_info')
         results = get_task_from_db(page, size, 0)
 
 
-# 任务2 爬取二舅视频评论
-def main2():
-    pass
+# 任务2 爬取视频评论
+async def main2():
+    page = 1
+    size = 30
+    results = get_task_from_db(page, size, 1)
+    while len(results) != 0:
+        videos = []
+        for r in results:
+            videos.append(Video(r[1], r[0]))
+        page += 1
+        print(page)
+        for v in videos:
+            await get_video_reply(av=v.av)
+        results = get_task_from_db(page, size, 1)
 
 
-# 任务3 爬取热门视频
-def main3():
-    get_ranking()
+# 任务3 爬取视频子评论
+async def main3():
+    await get_sub_reply()
 
 
-if __name__ == "__main__":
-    # main1()
-    # get_ranking()
-    info16 = get_video_info(bv='BV1MN4y177PB')
-    save_into_db(info16, 'video_info')
-    get_video_reply(av=898762590)
-    get_sub_reply(3)
-
-# info = get_video_info(bv="BV1zv4y117zo")
-# info2 = get_video_info(bv="BV1g84y1R7YH")
-# info3 = get_video_info(bv="BV1Lw411w7Hc")
-# info4 = get_video_info(bv="BV1x34y1M7LU")
-# info5 = get_video_info(av=863041388)
-# info6 = get_video_info(av=308030996)
-# info7 = get_video_info(av=990547962)
-# info8 = get_video_info(av=223004948)
-# info9 = get_video_info(av=223004948)
-# info10 = get_video_info(av=543790482)
-# info11 = get_video_info(bv='BV1zv4y117zo')
-# info12 = get_video_info(bv='BV16s41167m3')
-# info13 = get_video_info(bv='BV1n54y1S79k')
-# info14 = get_video_info(bv='BV1At4y1q7UQ')
-# info15 = get_video_info(bv='BV1kJ411Q7rY')
-info16 = get_video_info(bv='BV1MN4y177PB')
-# save_into_db(info, 'video_info')
-# save_into_db(info2, 'video_info')
-# save_into_db(info3, 'video_info')
-# save_into_db(info4, 'video_info')
-# save_into_db(info5, 'video_info')
-# save_into_db(info6, 'video_info')
-# save_into_db(info7, 'video_info')
-# save_into_db(info8, 'video_info')
-# save_into_db(info9, 'video_info')
-# save_into_db(info10, 'video_info')
-# save_into_db(info11, 'video_info')
-# save_into_db(info12, 'video_info')
-# save_into_db(info13, 'video_info')
-# save_into_db(info14, 'video_info')
-# save_into_db(info15, 'video_info')
-save_into_db(info16, 'video_info')
-# get_video_reply(av=863041388)
-# get_video_reply(av=308030996)
-# get_video_reply(av=990547962)
-# get_video_reply(av=223004948)
-# get_video_reply(av=543790482)
-# get_video_reply(av=565417552)
-
-# get_video_reply(av=6108496)
-# get_video_reply(av=838932570)
-# get_video_reply(av=627167023)
-# get_video_reply(av=77511727)
-get_video_reply(av=898762590)
-# get_sub_reply()
-get_sub_reply(3)
-
-# get_ranking()
-# TODO:研究如何并发，以及批量插入指定查询和更新
+# 启动爬虫
+async def start_spider(spider: SpiderParam):
+    loop = True
+    while loop:
+        if spider.type == 0:
+            await main1()
+        elif spider.type == 1:
+            await main2()
+        elif spider.type == 2:
+            await main3()
+        elif spider.type == 3:
+            await get_ranking()
+        else:
+            raise ValueError("爬虫类型错误！")
+        loop = spider.is_loop
+        print(f"循环状态：{loop},即将开始sleep")
+        await asyncio.sleep(spider.interval)
+        print(f"sleep结束")
