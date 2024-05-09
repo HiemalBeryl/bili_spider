@@ -120,7 +120,9 @@ async def get_video_info(av: Optional[str | int] = None, bv: Optional[str] = Non
         'like_times': j['stat']['like'],
         'coin': j['stat']['coin'],
         'favorite': j['stat']['favorite'],
-        'share_times': j['stat']['share']
+        'share_times': j['stat']['share'],
+        'owner_mid': j.get('owner', []).get('mid', ""),
+        'owner_name': j.get('owner', []).get('name', "")
     }
     return video_data
 
@@ -436,7 +438,7 @@ def get_task_from_db(page: int = 1, size: Optional[int] = 1000, task_type: int =
 
     try:
         cursor = connect.cursor()
-        sql = f"SELECT bv, av FROM task_list WHERE type = {task_type} AND is_working = 1 AND TIMESTAMPDIFF(MINUTE, last_execute_time, CURTIME()) LIMIT {size * (page - 1)},{size}"
+        sql = f"SELECT bv, av FROM task_list WHERE deleted = 0 AND type = {task_type} AND is_working = 1 AND TIMESTAMPDIFF(MINUTE, last_execute_time, CURTIME()) LIMIT {size * (page - 1)},{size}"
         print(sql)
         cursor.execute(sql)
         response = cursor.fetchall()
